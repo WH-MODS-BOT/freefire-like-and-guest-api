@@ -9,14 +9,17 @@ if ROOT not in sys.path:
 from guests_manager.count_guest import count
 
 def handler(request):
+
     try:
         total = count()
         return {
-            "statusCode": 200,
-            "body": json.dumps({"total_guests": total})
+            "status": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"total": total})
         }
     except Exception as e:
         return {
-            "statusCode": 500,
+            "status": 500,
+            "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": str(e)})
         }
