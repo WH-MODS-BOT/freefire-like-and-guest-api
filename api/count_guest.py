@@ -9,14 +9,10 @@ from guests_manager.count_guest import count
 
 app = Flask(__name__)
 
-@app.get("/api/count_guest")
-def get_guest_count():
+@app.route("/", methods=["GET"])
+def route_count_guest():
     try:
         total = count()
         return jsonify({"total": total})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-def handler(request, *args, **kwargs):
-    return app(request.environ, start_response=None)
