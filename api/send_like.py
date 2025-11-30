@@ -2,11 +2,9 @@ import json
 import os
 import sys
 import asyncio
-import httpx
-import time
 import binascii
+import httpx
 
-# tambahkan root path agar bisa import file original
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -15,99 +13,104 @@ from get_jwt import create_jwt
 from encrypt_like_body import create_like_payload
 from count_likes import GetAccountInformation
 
-# load guest file
-GUEST_FILE = os.path.join(ROOT, "guests_manager", "guests_converted.json")
-with open(GUEST_FILE, "r") as f:
+# load guest data (OK di serverless)
+GUESTS_FILE = os.path.join(ROOT, "guests_manager", "guests_converted.json")
+with open(GUESTS_FILE, "r") as f:
     GUESTS = json.load(f)
 
-# memory sementara (serverless tidak menyimpan file)
-usage_temp = {}
-
-def ensure_target(uid):
-    if uid not in usage_temp:
-        usage_temp[uid] = {"used": set()}
+# temporary RAM storage for this request (serverless OK)
+temp_used = {}
 
 def base_url(server):
-    server = server.upper()
-    if server == "IND":
-        return "https://client.ind.freefiremobile.com"
-    if server in {"BR", "US", "SAC", "NA"}:
+    s = server.upper()
+    if s == "IND": return "https://client.ind.freefiremobile.com"
+    if s in {"BR","US","SAC","NA"}:
         return "https://client.us.freefiremobile.com"
     return "https://clientbp.ggblueshark.com"
 
-async def like_single(guest, target_uid, BASE_URL, semaphore):
+
+async def like_one(guest, target_uid, BASE_URL, semaphore):
     guest_uid = str(guest["uid"])
     guest_pw = guest["password"]
 
-    if guest_uid in usage_temp[target_uid]["used"]:
+    if guest_uid in temp_used.get(target_uid, set()):
         return False
 
     async with semaphore:
         try:
-            jwt, region, server_from_jwt = await create_jwt(guest_uid, guest_pw)
+            jwt, region, _ = await create_jwt(guest_uid, guest_pw)
             payload = create_like_payload(target_uid, region)
             if isinstance(payload, str):
                 payload = binascii.unhexlify(payload)
 
             headers = {
-                "User-Agent": "Dalvik/2.1.0 (Linux; Android 14)",
+                "User-Agent": "Dalvik FF",
                 "Content-Type": "application/octet-stream",
-                "Authorization": f"Bearer {jwt}",
+                "Authorization": f"Bearer {jwt}"
             }
 
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(f"{BASE_URL}/LikeProfile", data=payload, headers=headers)
-                resp.raise_for_status()
+            async with httpx.AsyncClient() as c:
+                r = await c.post(f"{BASE_URL}/LikeProfile", data=payload, headers=headers)
+                r.raise_for_status()
 
-            usage_temp[target_uid]["used"].add(guest_uid)
+            temp_used.setdefault(target_uid, set()).add(guest_uid)
             return True
 
-        except Exception:
+        except:
             return False
 
-async def process_likes(uid, server, likes, max_concurrent):
+
+async def do_likes(uid, server, likes, max_conc):
     BASE_URL = base_url(server)
-    ensure_target(uid)
+    sem = asyncio.Semaphore(max_conc)
 
     available = [
         g for g in GUESTS 
-        if str(g["uid"]) not in usage_temp[uid]["used"]
+        if g["uid"] not in temp_used.get(uid, set())
     ]
 
-    likes = min(len(available), likes)
-
-    sem = asyncio.Semaphore(max_concurrent)
-    tasks = [
-        like_single(g, uid, BASE_URL, sem)
-        for g in available[:likes]
-    ]
+    likes = min(likes, len(available))
+    tasks = [like_one(g, uid, BASE_URL, sem) for g in available[:likes]]
 
     results = await asyncio.gather(*tasks)
     success = sum(1 for r in results if r)
 
-    info_after = await GetAccountInformation(uid, "0", server, "/GetPlayerPersonalShow")
+    info = await GetAccountInformation(uid, "0", server, "/GetPlayerPersonalShow")
 
     return {
         "attempted": likes,
         "success": success,
-        "after_info": info_after
+        "after": info
     }
 
+
 def handler(request):
+    """
+    Vercel Python expected sync handler
+    """
     try:
-        uid = request.args.get("uid")
-        server = request.args.get("server", "IND")
-        likes = int(request.args.get("likes", 100))
-        max_concurrent = int(request.args.get("max_concurrent", 20))
+        uid = request.get("query", {}).get("uid")
+        server = request.get("query", {}).get("server", "IND")
+        likes = int(request.get("query", {}).get("likes", 50))
+        max_conc = int(request.get("query", {}).get("max_conc", 10))
     except:
-        return {"statusCode": 400, "body": json.dumps({"error": "invalid parameters"})}
+        return {
+            "status": 400,
+            "headers": { "Content-Type": "application/json" },
+            "body": json.dumps({"error": "invalid parameters"})
+        }
 
     if not uid:
-        return {"statusCode": 400, "body": json.dumps({"error": "uid is required"})}
+        return {
+            "status": 400,
+            "headers": { "Content-Type": "application/json" },
+            "body": json.dumps({"error": "uid required"})
+        }
 
-    result = asyncio.run(process_likes(uid, server, likes, max_concurrent))
+    result = asyncio.run(do_likes(uid, server, likes, max_conc))
 
     return {
-        "statusCode": 200,
+        "status": 200,
+        "headers": { "Content-Type": "application/json" },
         "body": json.dumps(result)
     }
