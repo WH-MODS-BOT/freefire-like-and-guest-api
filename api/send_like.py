@@ -1,9 +1,5 @@
-import json
-import os
-import sys
-import asyncio
-import binascii
-import httpx
+from flask import Flask, request, jsonify
+import os, sys, json, asyncio, binascii, httpx
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
@@ -13,18 +9,20 @@ from get_jwt import create_jwt
 from encrypt_like_body import create_like_payload
 from count_likes import GetAccountInformation
 
-# load guest data (OK di serverless)
-GUESTS_FILE = os.path.join(ROOT, "guests_manager", "guests_converted.json")
-with open(GUESTS_FILE, "r") as f:
+app = Flask(__name__)
+
+# load guests
+GUEST_FILE = os.path.join(ROOT, "guests_manager", "guests_converted.json")
+with open(GUEST_FILE, "r") as f:
     GUESTS = json.load(f)
 
-# temporary RAM storage for this request (serverless OK)
 temp_used = {}
 
 def base_url(server):
-    s = server.upper()
-    if s == "IND": return "https://client.ind.freefiremobile.com"
-    if s in {"BR","US","SAC","NA"}:
+    server = server.upper()
+    if server == "IND":
+        return "https://client.ind.freefiremobile.com"
+    if server in {"BR","US","SAC","NA"}:
         return "https://client.us.freefiremobile.com"
     return "https://clientbp.ggblueshark.com"
 
@@ -55,7 +53,6 @@ async def like_one(guest, target_uid, BASE_URL, semaphore):
 
             temp_used.setdefault(target_uid, set()).add(guest_uid)
             return True
-
         except:
             return False
 
@@ -65,8 +62,8 @@ async def do_likes(uid, server, likes, max_conc):
     sem = asyncio.Semaphore(max_conc)
 
     available = [
-        g for g in GUESTS 
-        if g["uid"] not in temp_used.get(uid, set())
+        g for g in GUESTS
+        if str(g["uid"]) not in temp_used.get(uid, set())
     ]
 
     likes = min(likes, len(available))
@@ -74,7 +71,6 @@ async def do_likes(uid, server, likes, max_conc):
 
     results = await asyncio.gather(*tasks)
     success = sum(1 for r in results if r)
-
     info = await GetAccountInformation(uid, "0", server, "/GetPlayerPersonalShow")
 
     return {
@@ -84,33 +80,20 @@ async def do_likes(uid, server, likes, max_conc):
     }
 
 
-def handler(request):
-    """
-    Vercel Python expected sync handler
-    """
-    try:
-        uid = request.get("query", {}).get("uid")
-        server = request.get("query", {}).get("server", "IND")
-        likes = int(request.get("query", {}).get("likes", 50))
-        max_conc = int(request.get("query", {}).get("max_conc", 10))
-    except:
-        return {
-            "status": 400,
-            "headers": { "Content-Type": "application/json" },
-            "body": json.dumps({"error": "invalid parameters"})
-        }
+@app.get("/api/send_like")
+def send_like():
+    uid = request.args.get("uid")
+    server = request.args.get("server", "IND")
+    likes = int(request.args.get("likes", 50))
+    max_conc = int(request.args.get("max_conc", 10))
 
     if not uid:
-        return {
-            "status": 400,
-            "headers": { "Content-Type": "application/json" },
-            "body": json.dumps({"error": "uid required"})
-        }
+        return jsonify({"error": "uid required"}), 400
 
     result = asyncio.run(do_likes(uid, server, likes, max_conc))
+    return jsonify(result)
 
-    return {
-        "status": 200,
-        "headers": { "Content-Type": "application/json" },
-        "body": json.dumps(result)
-    }
+
+# export app for Vercel
+def handler(request, *args, **kwargs):
+    return app(request.environ, start_response=None)
